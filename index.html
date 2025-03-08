@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anonymous Support Chat</title>
+    <link rel="manifest" href="/manifest.json">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f0f2f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .login-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .chat-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: none;
+        }
+        .messages {
+            height: 400px;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        .message {
+            margin: 5px 0;
+            padding: 8px 12px;
+            border-radius: 15px;
+            max-width: 70%;
+        }
+        .message.sent {
+            background: #0084ff;
+            color: white;
+            margin-left: auto;
+        }
+        .message.received {
+            background: #e4e6eb;
+            color: black;
+        }
+        .input-container {
+            display: flex;
+            gap: 10px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #0084ff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:disabled {
+            background: #ccc;
+        }
+        .typing-indicator {
+            font-style: italic;
+            color: #666;
+            margin: 5px 0;
+        }
+        .call-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        .call-status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .online-users {
+            margin-bottom: 15px;
+        }
+        .error {
+            color: red;
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="login-container" class="login-container">
+            <h2>Enter your nickname</h2>
+            <div class="input-container">
+                <input type="text" id="nickname-input" placeholder="Enter a nickname (3-20 characters)">
+                <button id="set-nickname-btn">Join Chat</button>
+            </div>
+            <p class="error" id="nickname-error"></p>
+        </div>
+
+        <div id="chat-container" class="chat-container">
+            <div class="online-users">
+                <h3>Online Users</h3>
+                <div id="users-list"></div>
+            </div>
+            
+            <div class="messages" id="messages"></div>
+            <div id="typing-indicator" class="typing-indicator"></div>
+            
+            <div class="input-container">
+                <input type="text" id="message-input" placeholder="Type a message...">
+                <button id="send-btn">Send</button>
+            </div>
+
+            <div class="call-controls">
+                <button id="call-btn">Start Voice Call</button>
+                <button id="end-call-btn" style="display: none;">End Call</button>
+                <button id="toggle-mute-btn" style="display: none;">Mute</button>
+            </div>
+            <div id="call-status" class="call-status"></div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script>
+        let socket;
+        let currentUser;
+        let isInCall = false;
+        let isMuted = false;
+        let peerConnection;
+        let localStream;
+
+        // WebRTC configuration
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        };
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Connect to Socket.IO server
+            socket = io();
+
+            const loginContainer = document.getElementById('login-container');
+            const chatContainer = document.getElementById('chat-container');
+            const nicknameInput = document.getElementById('nickname-input');
+            const setNicknameBtn = document.getElementById('set-nickname-btn');
+            const messageInput = document.getElementById('message-input');
+            const sendBtn = document.getElementById('send-btn');
+            const messagesDiv = document.getElementById('messages');
+            const callBtn = document.getElementById('call-btn');
+            const endCallBtn = document.getElementById('end-call-btn');
+            const toggleMuteBtn = document.getElementById('toggle-mute-btn');
+            const typingIndicator = document.getElementById('typing-indicator');
+            const nicknameError = document.getElementById('nickname-error');
+            const usersList = document.getElementById('users-list');
+
+            // Handle nickname setting
+            setNicknameBtn.addEventListener('click', () => {
+                const nickname = nicknameInput.value.trim();
+                socket.emit('set_nickname', { nickname });
+            });
+
+            socket.on('nickname_set', (nickname) => {
+                currentUser = nickname;
+                loginContainer.style.display = 'none';
+                chatContainer.style.display = 'block';
+                nicknameError.textContent = '';
+            });
+
+            socket.on('nickname_taken', () => {
+                nicknameError.textContent = 'Nickname already taken or invalid';
+            });
+
+            socket.on('update_users', (users) => {
+                usersList.innerHTML = users
+                    .filter(user => user !== currentUser)
+                    .map(user => `<div>${user}</div>`)
+                    .join('');
+            });
+
+            // Handle messages
+            sendBtn.addEventListener('click', sendMessage);
+            messageInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') sendMessage();
+            });
+
+            socket.on('receive_message', (data) => {
+                appendMessage(data.from, data.message, false);
+            });
+
+            // Handle typing indicators
+            let typingTimeout;
+            messageInput.addEventListener('input', () => {
+                if (!typingTimeout) {
+                    socket.emit('typing', { to: selectedUser, isTyping: true });
+                }
+                clearTimeout(typingTimeout);
+                typingTimeout = setTimeout(() => {
+                    socket.emit('typing', { to: selectedUser, isTyping: false });
+                    typingTimeout = null;
+                }, 1000);
+            });
+
+            socket.on('user_typing', (data) => {
+                typingIndicator.textContent = data.isTyping ? `${data.from} is typing...` : '';
+            });
+
+            // Voice call handling
+            callBtn.addEventListener('click', startCall);
+            endCallBtn.addEventListener('click', endCall);
+            toggleMuteBtn.addEventListener('click', toggleMute);
+
+            socket.on('incoming_call', async (data) => {
+                if (confirm(`Incoming call from ${data.from}. Accept?`)) {
+                    try {
+                        await setupMediaStream();
+                        socket.emit('accept_call', { from: data.from });
+                        setupPeerConnection(data.from, false);
+                    } catch (error) {
+                        console.error('Error accepting call:', error);
+                    }
+                } else {
+                    socket.emit('reject_call', { to: data.from });
+                }
+            });
+
+            socket.on('call_accepted', (data) => {
+                setupPeerConnection(data.from, true);
+            });
+
+            socket.on('offer', async (data) => {
+                try {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    socket.emit('answer', { to: data.from, answer });
+                } catch (error) {
+                    console.error('Error handling offer:', error);
+                }
+            });
+
+            socket.on('answer', async (data) => {
+                try {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                } catch (error) {
+                    console.error('Error handling answer:', error);
+                }
+            });
+
+            socket.on('ice_candidate', async (data) => {
+                try {
+                    if (data.candidate) {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                    }
+                } catch (error) {
+                    console.error('Error handling ICE candidate:', error);
+                }
+            });
+
+            socket.on('end_call', () => {
+                endCall();
+            });
+        });
+
+        function appendMessage(sender, message, isSent) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
+            messageDiv.textContent = isSent ? message : `${sender}: ${message}`;
+            document.getElementById('messages').appendChild(messageDiv);
+            messageDiv.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (message && selectedUser) {
+                socket.emit('send_message', { to: selectedUser, message });
+                appendMessage(currentUser, message, true);
+                messageInput.value = '';
+            }
+        }
+
+        let selectedUser = null;
+        document.getElementById('users-list').addEventListener('click', (e) => {
+            if (e.target.tagName === 'DIV') {
+                selectedUser = e.target.textContent;
+                Array.from(e.target.parentElement.children).forEach(div => {
+                    div.style.backgroundColor = 'transparent';
+                });
+                e.target.style.backgroundColor = '#e4e6eb';
+            }
+        });
+
+        async function setupMediaStream() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                return true;
+            } catch (error) {
+                console.error('Error accessing media devices:', error);
+                return false;
+            }
+        }
+
+        async function startCall() {
+            if (!selectedUser) {
+                alert('Please select a user to call');
+                return;
+            }
+
+            try {
+                const hasMedia = await setupMediaStream();
+                if (!hasMedia) return;
+
+                socket.emit('call_request', { to: selectedUser });
+                document.getElementById('call-status').textContent = 'Calling...';
+                callBtn.style.display = 'none';
+                endCallBtn.style.display = 'inline';
+                toggleMuteBtn.style.display = 'inline';
+            } catch (error) {
+                console.error('Error starting call:', error);
+            }
+        }
+
+        function setupPeerConnection(targetUser, isInitiator) {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('ice_candidate', {
+                        to: targetUser,
+                        candidate: event.candidate
+                    });
+                }
+            };
+
+            peerConnection.ontrack = (event) => {
+                const remoteAudio = new Audio();
+                remoteAudio.srcObject = event.streams[0];
+                remoteAudio.play();
+            };
+
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            if (isInitiator) {
+                createAndSendOffer(targetUser);
+            }
+
+            isInCall = true;
+            document.getElementById('call-status').textContent = 'Connected';
+        }
+
+        async function createAndSendOffer(targetUser) {
+            try {
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                socket.emit('offer', { to: targetUser, offer });
+            } catch (error) {
+                console.error('Error creating offer:', error);
+            }
+        }
+
+        function endCall() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+            isInCall = false;
+            callBtn.style.display = 'inline';
+            endCallBtn.style.display = 'none';
+            toggleMuteBtn.style.display = 'none';
+            document.getElementById('call-status').textContent = '';
+            if (selectedUser) {
+                socket.emit('end_call', { to: selectedUser });
+            }
+        }
+
+        function toggleMute() {
+            if (localStream) {
+                const audioTrack = localStream.getAudioTracks()[0];
+                audioTrack.enabled = !audioTrack.enabled;
+                isMuted = !audioTrack.enabled;
+                toggleMuteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+            }
+        }
+
+        // Send heartbeat every 30 seconds to keep connection alive
+        setInterval(() => {
+            if (socket.connected) {
+                socket.emit('heartbeat');
+            }
+        }, 30000);
+    </script>
+</body>
+</html>
