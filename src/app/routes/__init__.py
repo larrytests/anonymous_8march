@@ -1,4 +1,4 @@
-from flask import Blueprint, send_file, send_from_directory
+from flask import Blueprint, send_file
 import io
 
 main_bp = Blueprint('main', __name__)
